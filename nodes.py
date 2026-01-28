@@ -264,11 +264,19 @@ def _cache_dit_diffusion_model_wrapper(executor, *args, **kwargs):
         # Execute forward pass
         output = executor(*args, **kwargs)
         
-        # Apply noise injection if enabled (for cached outputs)
+        # Apply noise injection if enabled (prevents "dead" regions in cached outputs)
         if config is not None and config.noise_scale > 0:
-            # Note: noise injection is applied at cache-dit level via custom logic
-            # This is a fallback for manual noise injection
-            pass
+            try:
+                # Only apply to cached steps (after warmup)
+                if config.current_step >= config.max_warmup_steps:
+                    output = apply_noise_injection(
+                        output=output,
+                        noise_scale=config.noise_scale,
+                    )
+                    if config.verbose and config.current_step % 10 == 0:
+                        logger.debug(f"[CacheDiT] Applied noise injection: scale={config.noise_scale}")
+            except Exception as e:
+                logger.warning(f"[CacheDiT] Noise injection failed: {e}")
         
         return output
         
@@ -312,20 +320,19 @@ def _enable_cache_dit(transformer: torch.nn.Module, config: CacheDiTConfig):
         # Build calibrator config
         calibrator_config = build_calibrator_config(config.taylor_order)
         
-        # Enable cache with block_adapter parameter
-        enable_kwargs = {
-            "block_adapter": adapter,
-            "cache_config": cache_config,
-        }
+        # Enable cache - CRITICAL: first parameter must be named 'pipe_or_adapter'
+        enable_kwargs = {"cache_config": cache_config}
         if calibrator_config is not None:
             enable_kwargs["calibrator_config"] = calibrator_config
         
-        cache_dit.enable_cache(**enable_kwargs)
+        # Call enable_cache with adapter as first positional argument
+        cache_dit.enable_cache(adapter, **enable_kwargs)
         
         if config.verbose:
             logger.info(
                 f"[CacheDiT] Cache enabled: F{config.fn_blocks}B{config.bn_blocks}, "
-                f"threshold={config.threshold}, warmup={config.max_warmup_steps}"
+                f"threshold={config.threshold}, warmup={config.max_warmup_steps}, "
+                f"pattern={config.forward_pattern}, steps={config.num_inference_steps}"
             )
         
     except Exception as e:

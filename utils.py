@@ -343,16 +343,17 @@ def build_cache_config(
             config.enable_separate_cfg = enable_separate_cfg
         config.cfg_compute_first = cfg_compute_first
         
-        # Strategy-based configuration
+        # Strategy-based configuration with max_cached_steps
         if strategy == "static":
-            # Static: More aggressive caching, fewer compute steps
-            config.max_cached_steps = -1
+            # Static: More aggressive caching, fixed cache budget
+            config.max_cached_steps = int(num_inference_steps * 0.5) if num_inference_steps else -1
             config.max_continuous_cached_steps = -1
         elif strategy == "dynamic":
-            # Dynamic: Conservative caching
-            config.max_cached_steps = -1
+            # Dynamic: Conservative caching with limits
+            config.max_cached_steps = int(num_inference_steps * 0.7) if num_inference_steps else -1
             config.max_continuous_cached_steps = 4  # Limit continuous caching
         else:  # adaptive (default)
+            # Adaptive: Unlimited caching based on threshold
             config.max_cached_steps = -1
             config.max_continuous_cached_steps = -1
         
@@ -373,6 +374,11 @@ def build_cache_config(
                 )
                 config.steps_computation_mask = scm_mask
                 config.steps_computation_policy = "dynamic"
+        
+        logger.info(
+            f"[CacheDiT] DBCacheConfig: strategy={strategy}, "
+            f"max_cached_steps={config.max_cached_steps}, threshold={threshold}"
+        )
         
         return config
         
@@ -452,18 +458,29 @@ def build_block_adapter(
         
         pattern = get_forward_pattern(forward_pattern)
         
-        # For ComfyUI models, pass transformer directly
-        # BlockAdapter will auto-detect it's not from diffusers
+        # Log transformer info for debugging
+        transformer_class = transformer.__class__.__module__ + "." + transformer.__class__.__name__
+        logger.info(f"[CacheDiT] Building BlockAdapter for: {transformer_class}")
+        
+        # For ComfyUI models (non-diffusers), pass transformer directly
+        # BlockAdapter will auto-detect blocks and handle non-diffusers structure
         adapter = BlockAdapter(
             transformer=transformer,
             forward_pattern=pattern,
             auto=auto_detect,
         )
         
+        # Verify adapter was created successfully
+        if hasattr(adapter, 'blocks') and adapter.blocks:
+            logger.info(f"[CacheDiT] BlockAdapter created with {len(adapter.blocks)} blocks")
+        else:
+            logger.warning(f"[CacheDiT] BlockAdapter created but blocks list may be empty")
+        
         return adapter
         
     except Exception as e:
-        raise RuntimeError(f"Failed to build BlockAdapter: {e}")
+        logger.error(f"[CacheDiT] Failed to build BlockAdapter: {e}")
+        raise RuntimeError(f"Failed to build BlockAdapter for {transformer.__class__.__name__}: {e}")
 
 
 # =============================================================================
@@ -482,7 +499,17 @@ def format_summary_dashboard(
     Returns a beautifully formatted string for terminal/log output.
     """
     if not stats:
-        return "╔══════════════════════════════════════════════════════════════╗\n║  CacheDiT Summary: No statistics available                   ║\n╚══════════════════════════════════════════════════════════════╝"
+        width = 66
+        lines = []
+        lines.append("╔" + "═" * (width - 2) + "╗")
+        lines.append("║" + "CacheDiT Summary: No statistics available".center(width - 2) + "║")
+        lines.append("╠" + "═" + (width - 2) + "╣")
+        lines.append("║" + "⚠️  Cache may not be active. Check:".ljust(width - 2) + "║")
+        lines.append("║" + "   1. Threshold may be too strict".ljust(width - 2) + "║")
+        lines.append("║" + "   2. Model may not support caching".ljust(width - 2) + "║")
+        lines.append("║" + "   3. Check logs for errors".ljust(width - 2) + "║")
+        lines.append("╚" + "═" * (width - 2) + "╝")
+        return "\n".join(lines)
     
     # Extract key metrics
     total_steps = stats.get("total_steps", num_steps)
@@ -593,6 +620,7 @@ def get_summary_stats(transformer: torch.nn.Module) -> Dict[str, Any]:
         stats = cache_dit.summary(transformer)
         
         if stats is None:
+            logger.warning("[CacheDiT] cache_dit.summary() returned None - cache may not be active")
             return {}
         
         # Normalize stats to consistent format
@@ -612,10 +640,19 @@ def get_summary_stats(transformer: torch.nn.Module) -> Dict[str, Any]:
             if computed > 0:
                 result["speedup"] = result["total_steps"] / computed
         
+        # Debug log if no caching occurred
+        if result["total_steps"] > 0 and result["cached_steps"] == 0:
+            logger.warning(
+                f"[CacheDiT] No steps were cached! "
+                f"Check threshold ({result.get('threshold', 'N/A')}) - it may be too strict."
+            )
+        
         return result
         
     except Exception as e:
-        logger.warning(f"Failed to get summary stats: {e}")
+        logger.error(f"[CacheDiT] Failed to get summary stats: {e}")
+        import traceback
+        traceback.print_exc()
         return {}
 
 
