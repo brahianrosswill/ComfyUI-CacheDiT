@@ -287,7 +287,6 @@ def _enable_cache_dit(transformer: torch.nn.Module, config: CacheDiTConfig):
     """
     try:
         import cache_dit
-        from cache_dit.caching.cache_adapters import CachedAdapter
         
         # Build BlockAdapter
         adapter = build_block_adapter(
@@ -313,15 +312,15 @@ def _enable_cache_dit(transformer: torch.nn.Module, config: CacheDiTConfig):
         # Build calibrator config
         calibrator_config = build_calibrator_config(config.taylor_order)
         
-        # Use CachedAdapter.cachify directly to bypass auto_block_adapter
-        cachify_kwargs = {"cache_config": cache_config}
+        # Enable cache with block_adapter parameter
+        enable_kwargs = {
+            "block_adapter": adapter,
+            "cache_config": cache_config,
+        }
         if calibrator_config is not None:
-            cachify_kwargs["calibrator_config"] = calibrator_config
+            enable_kwargs["calibrator_config"] = calibrator_config
         
-        cached_adapter = CachedAdapter.cachify(
-            block_adapter=adapter,
-            **cachify_kwargs
-        )
+        cache_dit.enable_cache(**enable_kwargs)
         
         if config.verbose:
             logger.info(
