@@ -35,6 +35,11 @@ from .utils import (
     apply_noise_injection,
 )
 
+try:
+    from cache_dit.caching import ForwardPattern
+except ImportError:
+    ForwardPattern = None
+
 if TYPE_CHECKING:
     from comfy.model_patcher import ModelPatcher
 
@@ -88,61 +93,127 @@ def _enable_lightweight_cache(transformer, blocks, config, cache_config):
     transformer_class = transformer.__class__.__name__
     total_steps = config.num_inference_steps if config.num_inference_steps else 28
     
-    # Model-specific configurations based on architecture and characteristics
-    if "NextDiT" in transformer_class or "Lumina" in transformer_class:
-        # NextDiT/Lumina: simpler architecture, can skip more aggressively
-        warmup_steps = min(3, total_steps // 3)
-        if total_steps <= 15:
-            skip_interval = 2  # 50% skip for short
-        else:
-            skip_interval = 2  # 33% skip for longer
+    # Check if user provided overrides
+    has_user_warmup = hasattr(config, 'user_warmup_ratio') and config.user_warmup_ratio > 0
+    has_user_skip = hasattr(config, 'user_skip_interval') and config.user_skip_interval > 0
+    
+    # Debug: log what we found
+    logger.info(
+        f"[CacheDiT] Checking user overrides: "
+        f"has_warmup_attr={hasattr(config, 'user_warmup_ratio')}, "
+        f"warmup_value={getattr(config, 'user_warmup_ratio', 'N/A')}, "
+        f"has_skip_attr={hasattr(config, 'user_skip_interval')}, "
+        f"skip_value={getattr(config, 'user_skip_interval', 'N/A')}"
+    )
+    
+    if has_user_warmup:
+        # User specified warmup ratio
+        warmup_steps = int(total_steps * config.user_warmup_ratio)
+        logger.info(f"[CacheDiT] User override: warmup_ratio={config.user_warmup_ratio:.2f} → {warmup_steps} steps")
+    else:
+        # Will be set from model-specific defaults
+        warmup_steps = None
+    
+    if has_user_skip:
+        # User specified skip interval
+        skip_interval = config.user_skip_interval
+        logger.info(f"[CacheDiT] User override: skip_interval={skip_interval}")
+    else:
+        # Will be set from model-specific defaults
+        skip_interval = None
+    
+    # Model-specific configurations (set any unspecified parameters)
+    if "NextDiT" in transformer_class:
+        # Z-Image (NextDiT): Quality-sensitive, balanced caching for speed
+        # Official cache-dit uses --scm fast (~50% cache) for Z-Image-Turbo
+        # We use medium settings: warmup 50%, then skip 33% of remaining steps
+        if warmup_steps is None:
+            warmup_steps = max(total_steps // 2, 8)  # Warmup 50% of steps
+        if skip_interval is None:
+            skip_interval = 3  # Skip 33% of post-warmup steps (compute, compute, skip)
+        noise_scale = 0.0  # Z-Image: NO noise injection
+            
+    elif "Lumina" in transformer_class:
+        # Lumina2: simpler architecture, can skip more aggressively
+        if warmup_steps is None:
+            warmup_steps = min(3, total_steps // 3)
+        if skip_interval is None:
+            skip_interval = 2  # 33% skip
+        noise_scale = 0.0
     
     elif "QwenImage" in transformer_class or "Qwen" in transformer_class:
         # Qwen-Image: quality-sensitive, use conservative settings
-        warmup_steps = min(3, total_steps // 10)  # Shorter warmup for speed
-        if total_steps <= 20:
-            skip_interval = 2  # 33% skip
-        elif total_steps <= 40:
-            skip_interval = 2  # 33% skip  
-        else:
-            skip_interval = 3  # 25% skip for very long sequences
+        if warmup_steps is None:
+            warmup_steps = min(3, total_steps // 10)  # Shorter warmup for speed
+        if skip_interval is None:
+            if total_steps <= 20:
+                skip_interval = 2  # 33% skip
+            elif total_steps <= 40:
+                skip_interval = 2  # 33% skip  
+            else:
+                skip_interval = 3  # 25% skip for very long sequences
+        noise_scale = config.noise_scale if hasattr(config, 'noise_scale') else 0.0
     
     elif "Flux" in transformer_class or "FLUX" in transformer_class:
         # FLUX: well-tested, balanced approach
-        warmup_steps = min(3, total_steps // 4)
-        skip_interval = 2  # Standard 33% skip
+        if warmup_steps is None:
+            warmup_steps = min(3, total_steps // 4)
+        if skip_interval is None:
+            skip_interval = 2  # Standard 33% skip
+        noise_scale = config.noise_scale if hasattr(config, 'noise_scale') else 0.0
     
     elif "LTX" in transformer_class:
         # LTX-2: Video generation model, needs temporal consistency
         # Conservative settings to maintain frame quality and temporal coherence
-        warmup_steps = max(6, total_steps // 3)  # Longer warmup for stable baseline
-        if total_steps <= 15:
-            skip_interval = 6  # Very short sequences - very conservative (16% cache)
-        elif total_steps <= 30:
-            skip_interval = 5  # Short sequences - conservative (20% cache)
-        else:
-            skip_interval = 4  # Long sequences - balanced (25% cache)
+        if warmup_steps is None:
+            warmup_steps = max(6, total_steps // 3)  # Longer warmup for stable baseline
+        if skip_interval is None:
+            if total_steps <= 15:
+                skip_interval = 6  # Very short sequences - very conservative (16% cache)
+            elif total_steps <= 30:
+                skip_interval = 5  # Short sequences - conservative (20% cache)
+            else:
+                skip_interval = 4  # Long sequences - balanced (25% cache)
+        noise_scale = config.noise_scale if hasattr(config, 'noise_scale') else 0.0
     
     elif "HunyuanVideo" in transformer_class:
         # HunyuanVideo: Complex video model, very conservative
-        warmup_steps = max(8, total_steps // 4)
-        skip_interval = 5  # Very conservative for temporal consistency
+        if warmup_steps is None:
+            warmup_steps = max(8, total_steps // 4)
+        if skip_interval is None:
+            skip_interval = 5  # Very conservative for temporal consistency
+        noise_scale = config.noise_scale if hasattr(config, 'noise_scale') else 0.0
     
     else:
         # Unknown models: use safe defaults
-        warmup_steps = min(config.max_warmup_steps, total_steps // 3)
-        if total_steps <= 15:
-            skip_interval = 3  # Conservative
-        elif total_steps <= 30:
-            skip_interval = 2
-        else:
-            skip_interval = 3
+        if warmup_steps is None:
+            warmup_steps = min(config.max_warmup_steps, total_steps // 3)
+        if skip_interval is None:
+            if total_steps <= 15:
+                skip_interval = 3  # Conservative
+            elif total_steps <= 30:
+                skip_interval = 2
+            else:
+                skip_interval = 3
+        noise_scale = config.noise_scale if hasattr(config, 'noise_scale') else 0.0
     
-    # Override with user config if explicitly set (not default)
-    if config.max_warmup_steps != 3:  # User changed from default
-        warmup_steps = config.max_warmup_steps
+    # Ensure all parameters are set (fallback to safe defaults)
+    if warmup_steps is None:
+        warmup_steps = max(total_steps // 3, 3)
+        logger.warning(f"[CacheDiT] warmup_steps not set, using fallback: {warmup_steps}")
+    if skip_interval is None:
+        skip_interval = 3
+        logger.warning(f"[CacheDiT] skip_interval not set, using fallback: {skip_interval}")
+    if 'noise_scale' not in locals():
+        noise_scale = 0.0
     
-    noise_scale = config.noise_scale if hasattr(config, 'noise_scale') else 0.0
+    # Log final configuration
+    logger.info(
+        f"[CacheDiT] Lightweight cache config: "
+        f"warmup={warmup_steps}/{total_steps} ({100*warmup_steps//total_steps}%), "
+        f"skip_interval={skip_interval} (~{100//skip_interval}% cache), "
+        f"noise={noise_scale:.4f}"
+    )
     
     def cached_forward(*args, **kwargs):
         """
@@ -193,14 +264,14 @@ def _enable_lightweight_cache(transformer, blocks, config, cache_config):
         
         # Post-warmup: decide whether to skip based on fixed interval
         # Skip pattern: For skip_interval=2: compute, skip, compute, skip, ...
-        # For skip_interval=3: compute, skip, skip, compute, skip, skip, ...
+        # For skip_interval=8: compute 7 times, skip 1, compute 7 times, skip 1, ...
         steps_after_warmup = call_id - warmup_steps
-        should_compute = (steps_after_warmup % skip_interval == 1)
+        should_skip = (steps_after_warmup % skip_interval == 0)  # Skip when divisible by interval
         
         if call_id <= 15:
-            logger.info(f"[LightweightCache]   → After warmup: step={steps_after_warmup}, should_compute={should_compute}, has_cache={state['last_result'] is not None}")
+            logger.info(f"[LightweightCache]   → After warmup: step={steps_after_warmup}, should_skip={should_skip}, has_cache={state['last_result'] is not None}")
         
-        if not should_compute and state["last_result"] is not None:
+        if should_skip and state["last_result"] is not None:
             # Use cached result (with optional noise injection)
             state["skip_count"] += 1
             
@@ -319,6 +390,9 @@ class CacheDiTConfig:
         # Runtime settings
         verbose: bool = False,
         print_summary: bool = True,
+        # User overrides
+        user_warmup_ratio: float = 0.0,
+        user_skip_interval: int = 0,
     ):
         # Configuration
         self.model_type = model_type
@@ -340,6 +414,10 @@ class CacheDiTConfig:
         
         self.verbose = verbose
         self.print_summary = print_summary
+        
+        # User overrides for lightweight cache
+        self.user_warmup_ratio = user_warmup_ratio
+        self.user_skip_interval = user_skip_interval
         
         # Runtime state
         self.is_enabled = False
@@ -365,6 +443,9 @@ class CacheDiTConfig:
             scm_policy=self.scm_policy,
             verbose=self.verbose,
             print_summary=self.print_summary,
+            # User overrides (FIX: these were missing!)
+            user_warmup_ratio=self.user_warmup_ratio,
+            user_skip_interval=self.user_skip_interval,
         )
         new_config.is_enabled = self.is_enabled
         new_config.num_inference_steps = self.num_inference_steps
@@ -592,74 +673,88 @@ def _enable_cache_dit(transformer: torch.nn.Module, config: CacheDiTConfig):
         # Get forward pattern
         pattern = get_forward_pattern(config.forward_pattern)
         
-        # === Strategy Selection: cache-dit vs lightweight cache ===
-        # For ComfyUI non-standard models (NextDiT, Lumina2), use lightweight cache
-        # as cache-dit's BlockAdapter doesn't maintain transformer references properly
+        # === Strategy Selection: cache-dit BlockAdapter (official) ===
+        # Official cache-dit supports Z-Image (NextDiT) via registered adapter
         transformer_class_name = transformer.__class__.__name__
-        use_lightweight = transformer_class_name in ["NextDiT", "Lumina2"]
         
-        if use_lightweight:
-            logger.info(f"[CacheDiT] Detected {transformer_class_name} - using lightweight cache (optimized for ComfyUI)")
+        # Detect Z-Image/NextDiT: use Pattern_3 with check_forward_pattern=False
+        is_zimage = transformer_class_name == "NextDiT"
+        if is_zimage and ForwardPattern is not None:
+            pattern = ForwardPattern.Pattern_3
+            logger.info(f"[CacheDiT] Detected Z-Image (NextDiT) - using Pattern_3")
+        elif is_zimage:
+            logger.warning(f"[CacheDiT] ForwardPattern not available, using default pattern for Z-Image")
+        
+        # === Attempt to use cache-dit's BlockAdapter ===
+        cache_dit_failed = False
+        try:
+            # For Z-Image: blocks are in .layers, use transformer-based creation
+            if is_zimage:
+                # Z-Image blocks are already in transformer.layers (ModuleList)
+                # Official Z-Image adapter: pass transformer directly, BlockAdapter will find .layers
+                adapter = BlockAdapter(
+                    transformer=transformer,
+                    forward_pattern=pattern,
+                    check_forward_pattern=False,  # Z-Image uses 'x' not 'hidden_states'
+                )
+            else:
+                # Standard models: ensure blocks are ModuleList
+                blocks_module_list = manual_blocks
+                if not isinstance(manual_blocks, torch.nn.ModuleList):
+                    blocks_module_list = torch.nn.ModuleList(manual_blocks)
+                    logger.info(f"[CacheDiT] Converted {len(manual_blocks)} blocks to ModuleList")
+                
+                # Inject blocks into transformer for cache-dit auto-detection
+                if not hasattr(transformer, 'blocks'):
+                    transformer.blocks = blocks_module_list
+                    logger.info(f"[CacheDiT] Injected blocks into transformer.blocks")
+                
+                adapter = BlockAdapter(blocks=blocks_module_list)
+            
+            # Verify adapter has blocks
+            if not hasattr(adapter, 'blocks') or len(adapter.blocks) == 0:
+                raise RuntimeError(f"BlockAdapter created but has no blocks!")
+            
+            logger.info(f"[CacheDiT] ✓ BlockAdapter verified: {len(adapter.blocks)} blocks")
+            
+            # Enable cache with BlockAdapter
+            enable_kwargs = {
+                "cache_config": cache_config,
+                "forward_pattern": pattern,
+            }
+            if calibrator_config is not None:
+                enable_kwargs["calibrator_config"] = calibrator_config
+            
+            cache_dit.enable_cache(adapter, **enable_kwargs)
+            
+            # CRITICAL: Check if transformer reference is maintained
+            # If transformer is None, cache-dit won't be able to track statistics
+            if hasattr(adapter, 'transformer') and adapter.transformer is None:
+                logger.warning(f"[CacheDiT] BlockAdapter.transformer is None - statistics won't work")
+                raise RuntimeError("BlockAdapter has no transformer reference")
+            
+            logger.info(
+                f"[CacheDiT] ✓ Cache enabled via BlockAdapter: "
+                f"F{config.fn_blocks}B{config.bn_blocks}, "
+                f"threshold={config.threshold}, warmup={config.max_warmup_steps}"
+            )
+                
+        except Exception as e:
+            cache_dit_failed = True
+            logger.warning(f"[CacheDiT] cache-dit BlockAdapter failed: {e}")
+            import traceback
+            traceback.print_exc()
+            logger.info(f"[CacheDiT] Falling back to direct forward hook implementation")
+        
+        # === Fallback: Direct forward hook (for unsupported models) ===
+        if cache_dit_failed:
+            # Use simple but reliable forward replacement strategy
             _enable_lightweight_cache(
                 transformer=transformer,
                 blocks=manual_blocks,
                 config=config,
                 cache_config=cache_config,
             )
-        else:
-            # === Attempt to use cache-dit's BlockAdapter (for standard models) ===
-            cache_dit_failed = False
-            try:
-                # Inject blocks into transformer for cache-dit auto-detection
-                if not hasattr(transformer, 'blocks'):
-                    transformer.blocks = torch.nn.ModuleList(manual_blocks)
-                    logger.info(f"[CacheDiT] Injected {len(manual_blocks)} blocks into transformer.blocks")
-                
-                # Try creating BlockAdapter with just blocks (simplest approach)
-                adapter = BlockAdapter(blocks=manual_blocks)
-                
-                # Verify adapter has blocks
-                if not hasattr(adapter, 'blocks') or len(adapter.blocks) == 0:
-                    raise RuntimeError(f"BlockAdapter created but has no blocks!")
-                
-                logger.info(f"[CacheDiT] ✓ BlockAdapter verified: {len(adapter.blocks)} blocks")
-                
-                # Enable cache with BlockAdapter
-                enable_kwargs = {
-                    "cache_config": cache_config,
-                    "forward_pattern": pattern,
-                }
-                if calibrator_config is not None:
-                    enable_kwargs["calibrator_config"] = calibrator_config
-                
-                cache_dit.enable_cache(adapter, **enable_kwargs)
-                
-                # CRITICAL: Check if transformer reference is maintained
-                # If transformer is None, cache-dit won't be able to track statistics
-                if hasattr(adapter, 'transformer') and adapter.transformer is None:
-                    logger.warning(f"[CacheDiT] BlockAdapter.transformer is None - statistics won't work")
-                    raise RuntimeError("BlockAdapter has no transformer reference")
-                
-                logger.info(
-                    f"[CacheDiT] ✓ Cache enabled via BlockAdapter: "
-                    f"F{config.fn_blocks}B{config.bn_blocks}, "
-                    f"threshold={config.threshold}, warmup={config.max_warmup_steps}"
-                )
-                
-            except Exception as e:
-                cache_dit_failed = True
-                logger.warning(f"[CacheDiT] cache-dit BlockAdapter failed: {e}")
-                logger.info(f"[CacheDiT] Falling back to direct forward hook implementation")
-            
-            # === Fallback: Direct forward hook (for unsupported models) ===
-            if cache_dit_failed:
-                # Use simple but reliable forward replacement strategy
-                _enable_lightweight_cache(
-                    transformer=transformer,
-                    blocks=manual_blocks,
-                    config=config,
-                    cache_config=cache_config,
-                )
         
     except Exception as e:
         logger.error(f"[CacheDiT] ✗ Failed to enable cache: {e}")
@@ -762,12 +857,26 @@ class CacheDiT_Model_Optimizer:
                     "default": True,
                     "tooltip": "Enable/Disable CacheDiT acceleration\n启用/禁用 CacheDiT 加速"
                 }),
-            },
-            "optional": {
                 "model_type": (preset_names, {
                     "default": "Auto",
                     "tooltip": "Model preset (Auto=auto-detect, or select specific model)\n"
                                "模型预设 (Auto=自动检测, 或选择特定模型)"
+                }),
+                "warmup_ratio": ("FLOAT", {
+                    "default": 0.0,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.05,
+                    "tooltip": "Warmup ratio (0.0=use preset default, 0.25=warmup 25% of steps)\n"
+                               "预热比例 (0.0=使用预设默认值, 0.25=预热25%步数)"
+                }),
+                "skip_interval": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 10,
+                    "step": 1,
+                    "tooltip": "Skip interval (0=use preset default, 3=skip every 3rd step, 5=skip every 5th)\n"
+                               "跳过间隔 (0=使用预设默认值, 3=每3步跳1次, 5=每5步跳1次)"
                 }),
                 "print_summary": ("BOOLEAN", {
                     "default": True,
@@ -790,9 +899,18 @@ class CacheDiT_Model_Optimizer:
         model,
         enable: bool = True,
         model_type: str = "Auto",
+        warmup_ratio: float = 0.0,
+        skip_interval: int = 0,
         print_summary: bool = True,
     ):
         """Apply CacheDiT optimization to the model."""
+        
+        # Debug: Log ALL received parameters
+        logger.info(f"[CacheDiT] optimize() received parameters:")
+        logger.info(f"  enable={enable}, model_type={model_type}")
+        logger.info(f"  warmup_ratio={warmup_ratio} (type: {type(warmup_ratio).__name__})")
+        logger.info(f"  skip_interval={skip_interval} (type: {type(skip_interval).__name__})")
+        logger.info(f"  print_summary={print_summary}")
         
         # If disabled, return model as-is
         if not enable:
@@ -830,6 +948,10 @@ class CacheDiT_Model_Optimizer:
         # Get preset
         preset = get_preset(model_type)
         
+        # Log user overrides
+        if warmup_ratio > 0 or skip_interval > 0:
+            logger.info(f"[CacheDiT] User input: warmup_ratio={warmup_ratio}, skip_interval={skip_interval}")
+        
         # Use all preset defaults (fully automated)
         config = CacheDiTConfig(
             model_type=model_type,
@@ -838,15 +960,18 @@ class CacheDiT_Model_Optimizer:
             fn_blocks=preset.fn_blocks,
             bn_blocks=preset.bn_blocks,
             threshold=preset.threshold,
-            max_warmup_steps=3,  # Optimized default
+            max_warmup_steps=3,  # Optimized default (will be overridden by lightweight cache)
             enable_separate_cfg=preset.enable_separate_cfg,
             cfg_compute_first=preset.cfg_compute_first,
             skip_interval=0,  # Auto-managed by lightweight cache
-            noise_scale=0.0,
+            noise_scale=preset.noise_scale,
             taylor_order=1,
             scm_policy="none",
             verbose=False,
             print_summary=print_summary,
+            # User overrides for lightweight cache
+            user_warmup_ratio=warmup_ratio,
+            user_skip_interval=skip_interval,
         )
         
         # Store config in model options
