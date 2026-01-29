@@ -13,19 +13,19 @@
 ---
 
 <a name="english"></a>
-## 🚀 Overview
+## Overview
 
 ComfyUI-CacheDiT brings **1.4-1.6x speedup** to DiT (Diffusion Transformer) models through intelligent residual caching, with **zero configuration required**.
 
-### ✅ Tested & Verified Models
+### Enabled Models
 
 | Model | Steps | Speedup | Status |
 |-------|-------|---------|--------|
 | **Z-Image** | 50 | 1.5x | ✅ |
-| **Z-Image-Turbo** | 9 | 1.5x | ✅ |
+| **Z-Image-Turbo** | 9 | 1.9x | ✅ |
 | **Qwen-Image-2512** | 50 | 1.4-1.6x | ✅ |
 
-## 📦 Installation
+## Installation
 
 ### Prerequisites
 
