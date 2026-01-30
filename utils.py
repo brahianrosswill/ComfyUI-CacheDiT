@@ -71,6 +71,42 @@ class ModelPreset:
 # Hardcoded presets for 2026 mainstream models
 MODEL_PRESETS: Dict[str, ModelPreset] = {
     # =========================================================================
+    # Z-Image Series
+    # =========================================================================
+    "Z-Image": ModelPreset(
+        name="Z-Image",
+        description="Z-Image standard (recommended: 50 steps, cfg=4.0)",
+        description_cn="Z-Image 标准版 (推荐: 50步, cfg=4.0)",
+        forward_pattern="Pattern_1",
+        fn_blocks=8,  # F8B0 as specified
+        bn_blocks=0,
+        threshold=0.12,
+        max_warmup_steps=25,  # Half of 50 steps for quality
+        enable_separate_cfg=True,
+        cfg_compute_first=False,
+        skip_interval=0,
+        noise_scale=0.0,  # No noise injection for quality preservation
+        default_strategy="adaptive",
+        taylor_order=1,
+    ),
+    "Z-Image-Turbo": ModelPreset(
+        name="Z-Image-Turbo",
+        description="Z-Image Turbo (distilled, 4-9 steps)",
+        description_cn="Z-Image Turbo (蒸馏版, 4-9步)",
+        forward_pattern="Pattern_1",
+        fn_blocks=4,
+        bn_blocks=0,
+        threshold=0.15,
+        max_warmup_steps=3,
+        enable_separate_cfg=True,
+        cfg_compute_first=False,
+        skip_interval=0,
+        noise_scale=0.002,
+        default_strategy="static",
+        taylor_order=0,  # Disabled for low-step models
+    ),
+    
+    # =========================================================================
     # Qwen-Image Series
     # =========================================================================
     "Qwen-Image": ModelPreset(
@@ -82,22 +118,6 @@ MODEL_PRESETS: Dict[str, ModelPreset] = {
         bn_blocks=0,
         threshold=0.12,
         max_warmup_steps=8,
-        enable_separate_cfg=True,
-        cfg_compute_first=False,
-        skip_interval=0,
-        noise_scale=0.0,
-        default_strategy="adaptive",
-        taylor_order=1,
-    ),
-    "Qwen-Image-Layered": ModelPreset(
-        name="Qwen-Image-Layered",
-        description="Qwen-Image Layered (Alpha layer protection)",
-        description_cn="Qwen-Image 分层版 (保护 Alpha 层)",
-        forward_pattern="Pattern_1",
-        fn_blocks=8,  # F8B4 to protect Alpha layer
-        bn_blocks=4,
-        threshold=0.10,
-        max_warmup_steps=10,
         enable_separate_cfg=True,
         cfg_compute_first=False,
         skip_interval=0,
@@ -156,94 +176,6 @@ MODEL_PRESETS: Dict[str, ModelPreset] = {
         enable_separate_cfg=False,
         cfg_compute_first=False,
         skip_interval=3,
-        noise_scale=0.001,
-        default_strategy="dynamic",
-        taylor_order=1,
-    ),
-    
-    # =========================================================================
-    # Z-Image Series
-    # =========================================================================
-    "Z-Image": ModelPreset(
-        name="Z-Image",
-        description="Z-Image standard",
-        description_cn="Z-Image 标准版",
-        forward_pattern="Pattern_1",
-        fn_blocks=8,  # F8B0 as specified
-        bn_blocks=0,
-        threshold=0.12,
-        max_warmup_steps=8,
-        enable_separate_cfg=True,
-        cfg_compute_first=False,
-        skip_interval=0,
-        noise_scale=0.0015,  # Small noise injection
-        default_strategy="adaptive",
-        taylor_order=1,
-    ),
-    "Z-Image-Turbo": ModelPreset(
-        name="Z-Image-Turbo",
-        description="Z-Image Turbo (distilled, 4-9 steps)",
-        description_cn="Z-Image Turbo (蒸馏版, 4-9步)",
-        forward_pattern="Pattern_1",
-        fn_blocks=4,
-        bn_blocks=0,
-        threshold=0.15,
-        max_warmup_steps=3,
-        enable_separate_cfg=True,
-        cfg_compute_first=False,
-        skip_interval=0,
-        noise_scale=0.002,
-        default_strategy="static",
-        taylor_order=0,  # Disabled for low-step models
-    ),
-    
-    # =========================================================================
-    # Other Popular Models
-    # =========================================================================
-    "Flux": ModelPreset(
-        name="Flux",
-        description="Flux.1 Dev/Schnell",
-        description_cn="Flux.1 开发版/快速版",
-        forward_pattern="Pattern_0",
-        fn_blocks=10,
-        bn_blocks=0,
-        threshold=0.10,
-        max_warmup_steps=8,
-        enable_separate_cfg=True,
-        cfg_compute_first=False,
-        skip_interval=0,
-        noise_scale=0.0,
-        default_strategy="adaptive",
-        taylor_order=1,
-    ),
-    "HunyuanVideo": ModelPreset(
-        name="HunyuanVideo",
-        description="Hunyuan Video (fused CFG)",
-        description_cn="混元视频 (融合 CFG)",
-        forward_pattern="Pattern_3",
-        fn_blocks=6,
-        bn_blocks=2,
-        threshold=0.08,
-        max_warmup_steps=8,
-        enable_separate_cfg=False,  # Fused CFG
-        cfg_compute_first=False,
-        skip_interval=2,
-        noise_scale=0.001,
-        default_strategy="dynamic",
-        taylor_order=1,
-    ),
-    "Wan-2.1": ModelPreset(
-        name="Wan-2.1",
-        description="Wan 2.1 Video",
-        description_cn="万相 2.1 视频",
-        forward_pattern="Pattern_3",
-        fn_blocks=6,
-        bn_blocks=2,
-        threshold=0.08,
-        max_warmup_steps=8,
-        enable_separate_cfg=True,
-        cfg_compute_first=False,
-        skip_interval=2,
         noise_scale=0.001,
         default_strategy="dynamic",
         taylor_order=1,
