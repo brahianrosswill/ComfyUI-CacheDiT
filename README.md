@@ -106,6 +106,10 @@ else:
 - Saves 50% memory for cached tensors
 - Prevents VAE OOM on long sequences
 
+## Credits
+
+This project is based on [**cache-dit**](https://github.com/vipshop/cache-dit) by Vipshop's Machine Learning Platform Team.
+
 ## FAQ
 
 ### Q: Does this work with all models?
